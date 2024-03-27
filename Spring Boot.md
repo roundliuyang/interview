@@ -22,6 +22,40 @@ Spring Boot 提供了各种 Starter 启动器，提供标准化的默认配置�
 
 
 
+
+
+## SpringBoot 启动流程
+
+SpringApplication#run方法流程如下
+
+- 创建 stopWatch 对象，并启动，用于简单统计 run 启动过程的时长
+
+- **获得 SpringApplicationRunListener 的数组，并启动监听**
+
+  >使用自动配置，获得数组。容器启动、刷新、环境、运行都需要监听器处理相关事件
+
+- **加载属性配置**。执行完成后，所有的 environment 的属性都会加载进来，包括 application.properties 和外部的属性配置
+
+-  **创建 Spring 容器**
+
+- 调用所有初始化类的 **initialize** 方法,**准备 ApplicationContext 对象，主要是初始化它的一些属性。**
+
+- **启动（刷新） Spring 容器**
+
+- 通知 SpringApplicationRunListener 的数组，Spring **容器启动完成**。
+
+- 调用 ApplicationRunner 或者 CommandLineRunner 的运行方法。
+
+  > ApplicationRunner 、CommandLineRunner` 接口的 `Component` 会在所有 `Spring Beans `都初始化之后执行，非常适合在应用程序启动之初进行一些数据初始化的工作。
+
+- 通知 **SpringApplicationRunListener** 的数组，Spring 容器运行中。
+
+
+
+
+
+
+
 ## Spring Boot 的核心注解
 
 
@@ -137,7 +171,12 @@ Spring Boot 提供了各种 Starter 启动器，提供标准化的默认配置�
 
 ## 什么是 Spring Boot 自动配置
 
+```java
+// 开启（刷新）Spring 容器
+refresh(context);
+```
 
+**启动容器的时候进行自动配置。**
 
 `@EnableAutoConfiguration` 注解，打开 Spring Boot 自动配置的功能。
 
@@ -146,6 +185,16 @@ Spring Boot 提供了各种 Starter 启动器，提供标准化的默认配置�
 1. Spring Boot 在启动时扫描项目所依赖的 jar 包，寻找包含`spring.factories` 文件的 jar 包。
 2. 根据 `spring.factories` 配置加载 AutoConfigure 类。
 3. 根据 [`@Conditional` 等条件注解](http://svip.iocoder.cn/Spring-Boot/Interview/Spring Boot 条件注解) 的条件，进行自动配置并将 Bean 注入 Spring IoC 中。
+
+
+
+**简单流程**
+
+-  开启（刷新）Spring 容器   refresh
+- ......
+- AutoConfigurationImportSelector#process方法
+- 通过 SpringFactoriesLoader 类提供的方法加载类路径中META-INF目录下的spring.factories 文件中针对EnableAutoConfiguration的 注册配置类 
+- 
 
 
 

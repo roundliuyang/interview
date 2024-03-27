@@ -172,6 +172,18 @@ Redis GEO 操作方法有：
 - georadiusbymember：根据储存在位置集合里面的某个地点获取指定范围内的地理位置集合。
 - geohash：返回一个或多个位置对象的 geohash 值。
 
+比如可以用来查询附近的人。
+
+
+
+#### HyperLogLog
+
+HyperLogLog 是一种用于**估计集合中唯一元素数量的算法**，它通过概率统计方法，在极小的内存空间内提供近似的计数结果。这种方法特别适用于需要统计巨[大数据](https://cloud.tencent.com/solution/bigdata?from_column=20065&from=20065)集中唯一元素数量的场景(例如UV场景)。
+
+
+
+
+
 
 
 #### Bitmaps 
@@ -203,6 +215,7 @@ func ShowCurrentMonthSignIn(accountId int) (map[string]string, error) {
 		pos := (day - i) * -1
 		day := time.Now().Local().AddDate(0, 0, pos).Format(global.DateFormat1)
 		signDayList = append(signDayList, day)
+        // 这是一个逻辑表达式，表示如果将v右移一位再左移一位的结果与原来的v不相等，那么表达式的值为true；否则，表达式的值为false。这样做的目的是判断v的最低位是否为1。
 		var b = v>>1<<1 != v
 		signBoolList = append(signBoolList, b)
 		v >>= 1
@@ -222,9 +235,7 @@ func ShowCurrentMonthSignIn(accountId int) (map[string]string, error) {
 }
 ```
 
-反正我是十脸懵逼。
-
-
+如使用Bitmap 统计每月打卡。
 
 ## Redis为什么这么快
 
@@ -769,7 +780,7 @@ Sentinel哨兵模式
 
 
 
-**~~故障切换的过程是怎样的呢~~**
+**故障切换的过程是怎样的呢**
 
 >假设主服务器宕机，哨兵1先检测到这个结果，系统并不会马上进行 failover 过程，仅仅是哨兵1主观的认为主服务器不可用，这个现象成为主观下线。当后面的哨兵也检测到主服务器不可用，并且数量达到一定值时，那么哨兵之间就会进行一次投票，投票的结果由一个哨兵发起，进行 failover 操作。切换成功后，就会通过发布订阅模式，让各个哨兵把自己监控的从服务器实现切换主机，这个过程称为客观下线。这样对于客户端而言，一切都是透明的。
 
@@ -784,6 +795,8 @@ Sentinel哨兵模式
 5. 在一般情况下， 每个 Sentinel 会以每10秒一次的频率向它已知的所有Master，Slave发送 INFO 命令。
 6. 当Master被 Sentinel 标记为客观下线时，Sentinel 向下线的 Master 的所有 Slave 发送 INFO 命令的频率会从 10 秒一次改为每秒一次
 7. 若没有足够数量的 Sentinel同意Master已经下线， Master的客观下线状态就会被移除；若Master 重新向 Sentinel 的 PING 命令返回有效回复， Master 的主观下线状态就会被移除。
+
+说白了哨兵的分布式一致性算法使用 raft 共识算法。
 
 
 
@@ -859,11 +872,21 @@ Redis Cluster集群中，需要确保16384个槽对应的node都正常工作，�
 
 
 
+## 分布式下redis如何保证线程安全
+
+
+在分布式环境下，保证 Redis 的线程安全性主要涉及到以下几个方面：
+
+1. **Redis 原子性操作：** Redis 提供了一些原子性的操作，例如 SETNX（SET if Not eXists）、INCR（自增）、DECR（自减）等。这些操作是原子的，可以保证在多线程或多节点环境下的线程安全性。
+2. **事务：** Redis 支持事务，可以将多个命令封装在一个事务中，通过 MULTI 和 EXEC 命令来执行。事务中的所有命令将按顺序执行，并在 EXEC 时进行提交。事务的执行是原子的，要么全部执行成功，要么全部执行失败，这有助于保证多个命令之间的一致性。
+3. **分布式锁：** 在分布式环境中，为了保证对某一资源的独占访问，可以使用分布式锁。常见的实现方式包括使用 Redis 的 SETNX 命令或者使用 RedLock 等算法。通过获取分布式锁，可以确保在一段时间内只有一个线程能够执行特定的操作，从而保证线程安全性。
+4. **Watch-Multi-Exec 事务：** Redis 支持 Watch-Multi-Exec 模式，通过 WATCH 命令监视一个或多个键，然后在 EXEC 命令执行时检查这些键是否发生变化。如果有变化，则事务不会执行。这可以用于在多线程环境下保证某些操作的原子性。
+
+需要注意的是，虽然 Redis 在单节点上提供了这些原子性和事务的机制，但在分布式环境中，还需要考虑网络延迟、分布式锁的一致性等问题。
+
 
 
 ## 使用过Redis分布式锁嘛？有哪些注意点呢？
-
-
 
 **分布式锁**，是控制分布式系统不同进程共同访问共享资源的一种锁的实现。秒杀下单、抢红包等等业务场景，都需要用到分布式锁，我们项目中经常使用Redis作为分布式锁。
 
@@ -897,7 +920,7 @@ if（jedis.setnx(key,lock_value) == 1）{ //加锁
 
 
 
-### ~~setnx + value值是过期时间~~
+### setnx + value值是过期时间
 
 ```java
 long expires = System.currentTimeMillis() + expireTime; //系统时间+设置的过期时间
@@ -937,7 +960,7 @@ return false;
 
 
 
-### ~~set的扩展命令（set ex px nx）（注意可能存在的问题）~~
+### set的扩展命令（set ex px nx）（注意可能存在的问题）
 
 ```java
 if（jedis.set(key, lock_value, "NX", "EX", 100s) == 1）{ //加锁
@@ -961,7 +984,7 @@ if（jedis.set(key, lock_value, "NX", "EX", 100s) == 1）{ //加锁
 
 
 
-### ~~set ex px nx + 校验唯一随机值,再删除~~
+### set ex px nx + 校验唯一随机值,再删除
 
 
 
@@ -1000,7 +1023,7 @@ end
 
 
 
-## ~~使用过Redisson嘛？说说它的原理~~
+## 使用过Redisson嘛？说说它的原理
 
 
 
@@ -1010,7 +1033,7 @@ end
 
 ![preview](Redis.assets/543794095-313602df677a18df.png)
 
-只要线程一加锁成功，就会启动一个watch dog看门狗，它是一个后台线程，会每隔10秒检查一下，如果线程1还持有锁，那么就会不断的延长锁key的生存时间。因此，Redisson就是使用Redisson解决了**锁过期释放，业务没执行完**问题。
+只要线程一加锁成功，就会启动一个watch dog看门狗，它是一个后台线程，会每隔10秒检查一下，如果线程1还持有锁，那么就会不断的延长锁key的生存时间。因此，Redisson就是使用watch dog解决了**锁过期释放，业务没执行完**问题。
 
 
 
@@ -1072,7 +1095,7 @@ RedLock的实现步骤:如下
 
 
 
-## ~~MySQL与Redis 如何保证双写一致性~~
+## MySQL与Redis 如何保证双写一致性
 
 - 缓存延时双删
 - 删除缓存重试机制

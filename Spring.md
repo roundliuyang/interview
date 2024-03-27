@@ -49,6 +49,71 @@ Spring解决循环依赖的核心思想在于提前曝光：
 
 
 
+## 		SpringAOP
+
+1. AnnotationAwareAspectJAutoProxyCreator#postProcessAfterInitialization
+
+   ```java
+   /**
+   * 在初始化之后执行
+   * @param bean     bean
+   * @param beanName beanName
+   * @return 处理的bean
+   */
+   @Override
+   public Object postProcessAfterInitialization(@Nullable Object bean, String beanName) {
+      if (bean != null) {
+         Object cacheKey = getCacheKey(bean.getClass(), beanName);//构建缓存的Key
+         if (this.earlyProxyReferences.remove(cacheKey) != bean) {
+            return wrapIfNecessary(bean, beanName, cacheKey);//如果适合被代理, 则需要封装指定的bean
+         }
+      }
+      return bean;
+   }
+   ```
+
+   
+
+2. 为目标 bean 查找合适的通知器
+
+3. 获取所有对应的bean的增强器后，便可以进行代理的创建，Spring使用了JDKProxy和CglibProxy两种方式的代理。(下面以JDKProxy为例)
+
+4. 我们都知道JDK的动态代理的关键是创建自定义InvocationHandler，而InvocationHandler中包含了需要覆盖的函数getProxy，并且这个函数也一定会有一个invoke函数，并且JdkDynamicAopProxy会把AOP的核心逻辑写在其中
+
+   ```java
+   **
+   * JDK动态代理执行器
+   */
+   @Override
+   @Nullable
+   public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+   	//获取当前方法的拦截器链
+         List<Object> chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);
+   
+         if (chain.isEmpty()) {//没有任何拦截器链
+            //如果没有发现任何拦截器那么直接调用切点方法
+            Object[] argsToUse = AopProxyUtils.adaptArgumentsIfNecessary(method, args);
+            retVal = AopUtils.invokeJoinpointUsingReflection(target, method, argsToUse);
+         } else {//有拦截器链
+            //将拦截器封装在ReflectiveMethodInvocation
+            MethodInvocation invocation = new ReflectiveMethodInvocation(proxy, target, method, args, targetClass, chain);
+            //执行拦截器链
+            retVal = invocation.proceed();
+         }
+         ...
+   }
+   ```
+
+   上面的函数中最主要的工作就是创建了一个拦截器链，并使用ReflectiveMethodInvocation类进行了链的封装，而在ReflectiveMethodInvocation类的proceed方法中实现了拦截器的逐一调用。
+
+
+
+
+
+
+
+
+
 ## Spring 的延迟依赖查找
 
 
