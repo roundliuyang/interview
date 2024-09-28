@@ -316,9 +316,7 @@ RabbitMQ的高可用，是基于主从做高可用性的。它有三种模式：
 
 此时可以选择用RabbitMQ提供的【事务功能】，就是生产者**发送数据之前**开启RabbitMQ事务
 
-`channel.txSelect`，然后发送消息，如果消息没有成功被RabbitMQ接收到，那么生产者会收到异常报错，此时
-
-就可以回滚事务`channel.txRollback`，然后重试发送消息；如果收到了消息，那么可以提交事务`channel.txCommit`。代码如下：
+`channel.txSelect`，然后发送消息，如果消息没有成功被RabbitMQ接收到，那么生产者会收到异常报错，此时就可以回滚事务`channel.txRollback`，然后重试发送消息；如果收到了消息，那么可以提交事务`channel.txCommit`。代码如下：
 
 ```java
 // 开启事务
@@ -399,7 +397,7 @@ RabbitMQ如果丢失了数据，主要是因为你消费的时候，**刚消费�
 
 
 
-和 Kafka 与 RocketMQ 不同，Kafka 不存在类似类似 Topic 的概念，而是真正的一条一条队列，并且每个队列可以被多个 Consumer 拉取消息。这个，是非常大的一个差异。
+和 Kafka 与 RocketMQ 不同，Kafka 不存在类似类似 Topic 的概念，而是真正的一条一条队列，并且**每个队列可以被多个 Consumer 拉取消息**。这个，是非常大的一个差异。
 
 
 
