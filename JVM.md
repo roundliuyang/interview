@@ -386,7 +386,13 @@ public class JavaMethodAreaOOM {
 
 1. 通过一个类的全限定名获取定义此类的二进制字节流
 2. 将这个字节流所代表的静态存储结构转化为方法区的运行时数据结构
-3. 在内存中生成一个代表这个类的对象，作为方法区这个类的各种数据访问入口。 
+3. 在Java堆中生成一个代表这个类的java.lang.Class对象，作为对方法区中这些数据的访问入口。
+
+![img](JVM.assets/java_jvm_classload_1.png)
+
+
+
+
 
 
 

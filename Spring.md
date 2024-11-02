@@ -78,7 +78,7 @@ Spring解决循环依赖的核心思想在于提前曝光：
 
 3. 获取所有对应的bean的增强器后，便可以进行代理的创建，Spring使用了JDKProxy和CglibProxy两种方式的代理。(下面以JDKProxy为例)
 
-4. 我们都知道JDK的动态代理的关键是创建自定义InvocationHandler，而InvocationHandler中包含了需要覆盖的函数getProxy，并且这个函数也一定会有一个invoke函数，并且JdkDynamicAopProxy会把AOP的核心逻辑写在其中
+4. 通过之前的示例我们知道，JDKProxy的使用关键是创建自定义的InvocationHandler，而 InvocationHandler中包含了需要覆盖的函数getProxy，而当前的方法正是完成了这个操作。再次确认一下JdkDynamicAopProxy也确实实现了InvocationHandler接口，那么我们就可以推断出，在 JdkDynamicAopProxy 中一定会有个 invoke 函数，并且 JdkDynamicAopProxy 会把 AOP 的核心逻辑写在其中。
 
    ```java
    **
