@@ -516,3 +516,305 @@ public class Main {
 
 **第二种做法是避免使用finalize方法并改进finalize 过程。**
 
+
+
+## 双亲委派机制
+
+Java 虚拟机对class文件加载的是 按需加载 的方式，也就是说当前需要使用该类时才会将它的class文件加载的内存生成class对应，而且加载某个类的class文件时，Java虚拟机采用的是双亲委派模式，即把请求关键帧父类处理，它是一种任务委派模式。
+
+工作原理：
+
+- 如果一个类加载器收到了类加载请求，它并不会自己先去加载，而是把这个请求委托给父类的加载器去执行。
+
+- 如果父类加载器一这存在其父类加载器，则进一步向上委托，依次递归，请求最终将到达顶层的启动类加载器。
+
+- 如果父类加载器可以完成类加载任务，就成功返回，倘若父类加载器无法完成此加载任务，子加载器才会尝试自己去加载，这就是双新委派模式。
+
+  ![image-20250713191554669](JVM.assets/image-20250713191554669.png)
+
+### 优势
+
+- 避免类的重复加载
+
+- 保护程序安全，防止核心API祉以随意篡改
+
+  - 代码结构：定义java.lang.String类，与系统String类全限定名一样，发现自定义的String类无法正常加载。
+
+    ![1658594129404](../biji/jvm/类加载子系统.assets/1658594129404.png)
+
+  
+
+沙箱安全机制
+
+```java
+/*
+ * @Author: Kun Peh
+ * @Date: 2021-07-18 11:43:01
+ * @LastEditTime: 2021-07-18 15:14:58
+ * @Description: String  class
+ */
+package java.lang;
+
+public class String {
+	
+	static {
+		System.out.println("自定义String");
+	}
+	public static void main(String[] args) { // 报错
+		System.out.println("Hello");
+	}
+}
+```
+
+自定义String类，但是在加载自定义String类的时候会率先使用引导类加载器加载，而引导类加载器在加载的过程中会先加载jdk自带的文件(rt.jar包中java/lang/String.class)，报错的信息说没有main方法，就是因为加载的是rt.jar包中的String类，这样可以保证对java核心源代码的保护，这就是沙箱安全机制。
+
+
+
+## 破坏双亲委派模型
+
+### 案例一：重写 loadClass 方法
+
+通过分析源码可以知道双亲委派模型就是在`loadClass`中实现的，如果想打破，直接重写自己的`loadClass`逻辑即可
+
+在前文 **[自定义类加载器](https://lfool.github.io/LFool-Notes/java/自定义类加载器.html)** 的基础上，重写`loadClass`方法，其他不变：
+
+```java
+@Override
+protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+    synchronized (getClassLoadingLock(name)) {
+        // First, check if the class has already been loaded
+        Class<?> c = findLoadedClass(name);
+        if (c == null) {
+            // 如果是 jvm 自带的类还是需要通过双亲委派模型加载
+            // 自己写的类可以打破该模型
+            if (!name.startsWith("com.lfool.myself")) {
+                return this.getParent().loadClass(name);
+            } else {
+                c = findClass(name);
+            }
+        }
+        if (resolve) {
+            resolveClass(c);
+        }
+        return c;
+    }
+}
+```
+
+此时，就算不把类路径下对应的`com.lfool.myself.Test03`删掉，也会由自定义类加载器加载，而不会由应用程序类加载器加载
+
+### 案例二：涉及 SPI 的加载
+
+通过前文 **[双亲委派模型](https://lfool.github.io/LFool-Notes/java/双亲委派模型.html)** 介绍可以知道，JVM 使用「全盘委托机制」，但现在存在一个问题，如果有基础类需要回调用户的代码，怎么办？？？
+
+假设基础类的类加载器是启动类加载器，根据「全盘委托机制」，该类所依赖及引用的类也由这个 CladdLoader 加载，但该类所引用的是用户代码，启动类加载器根本加载不了
+
+所以这就涉及到父类加载器去请求子类加载器完成类加载行为，打通了双亲委派模型的层次结构来逆向使用类加载器，已经违背了双亲委派模型的一般性原则。
+
+
+
+#### `java.sql.Driver` 和 SPI 机制
+
+我们来看一个**标准的 JDK SPI 使用场景**：JDBC 驱动的加载。
+
+![image-20250713202145599](JVM.assets/image-20250713202145599.png)
+
+##### 背景
+
+在用户代码中，你只需要这样写：
+
+```java
+Connection conn = DriverManager.getConnection("jdbc:mysql://localhost:3306/db", "user", "password");
+```
+
+你没显式注册 `com.mysql.cj.jdbc.Driver`，但是它就 magically 被加载了。
+
+------
+
+##### SPI 注册机制：
+
+`DriverManager` 是由 **Bootstrap ClassLoader** 加载的，而我们使用的 `com.mysql.cj.jdbc.Driver` 是放在用户的 classpath 里的，由 **AppClassLoader** 加载。
+
+```java
+// DriverManager.java (由Bootstrap加载)
+static {
+    // 加载所有META-INF/services/java.sql.Driver里的实现
+    loadInitialDrivers();
+}
+```
+
+其内部使用的是：
+
+```java
+ServiceLoader<Driver> loader = ServiceLoader.load(Driver.class);
+```
+
+底层逻辑是：
+
+```java
+Thread.currentThread().getContextClassLoader()
+```
+
+也就是说，**它不是用自己的类加载器（Bootstrap）去加载 `Driver` 实现类，而是反向用“线程上下文类加载器”（通常是 AppClassLoader）去加载这些用户实现类**。
+
+------
+
+##### 总结这个例子：
+
+| 角色                       | 加载器                | 说明                                     |
+| -------------------------- | --------------------- | ---------------------------------------- |
+| `DriverManager`            | Bootstrap ClassLoader | 基础类                                   |
+| `com.mysql.cj.jdbc.Driver` | AppClassLoader        | 用户实现类                               |
+| 关系                       | 回调用户类            | 父类加载器无法直接加载，需要打破双亲委派 |
+
+**为了解决这个问题，JDK 使用了 `Thread.currentThread().getContextClassLoader()` 来绕过双亲委派模型**，允许父加载器间接使用子加载器加载类。
+
+------
+
+##### 框架中类似例子（比如 Dubbo、Spring）
+
+比如在 Spring 中：
+
+- 框架代码使用的是框架加载器；
+- 扫描用户的 `@Component`、`@Service` 等类时，使用的是 AppClassLoader。
+
+为了让框架能够找到用户的自定义实现，也需要使用类似的方式：
+
+```java
+ClassLoader cl = Thread.currentThread().getContextClassLoader();
+Class<?> userClass = cl.loadClass("com.example.MyServiceImpl");
+```
+
+------
+
+##### 小结
+
+这个例子说明：
+
+- 双亲委派机制是 JVM 默认的类加载策略；
+- 但 SPI 场景中需要“父调用子”，违背了这个策略；
+- 为了解决这个问题，引入了**线程上下文类加载器**来**突破双亲委派模型**；
+- 这是类加载器机制中非常经典的“反向委托”场景。
+
+
+
+### 案例三：热部署
+
+热部署是指在项目不重启的前提下，更改部分内容，还能使项目顺利运行
+
+OSGi 实现模块化热部署的关键是它自定义的类加载器机制的实现，每一个程序模块 (OSGi 中称为 Bundle) 都有一个自己的类加载器，当需要更换一个 Bundle 时，就把 Bundle 连同类加载器一起换掉以实现代码的热替换
+
+在 OSGi 环境下，类加载器不再使用双亲委派模型推荐的树状结构，而是进一步发展为更为复杂的网状结构。
+
+
+
+### 案例四：Tomcat 部署多应用
+
+#### 前提
+
+Tomcat 也是一个 Java 程序，启动一个 Tomcat 服务，首先创建一个 JVM 进程，然后 Tomcat 服务运行在 JVM 中
+
+部署在 Tomcat 中的多个应用以线程的形式存在，每个应用都有自己单独的来加载器，所以应用与应用之间无法相互调用，实现了类的隔离。
+
+#### 为什么要打破？
+
+通常，我们会在一个tomcat下部署多个应用，而这多个应用可能使用的类库的版本是不同的
+
+比如：项目 A 使用的是 Spring4，项目 B 使用的是 Spring5。Spring4 和 Spring5 多数类都是一样的，但是有个别类有所不同，这些不同是类的内容不同，而类名，包名都是一样的
+
+假如，我们采用 JDK 向上委托的方式，项目 A 在部署的时候，应用类加载器加载了它的类；在部署项目 B 的时候，由于类名相同，这时应用服务器就不会再次加载同包同名的类，这样就会有问题
+
+所以，Tomcat 需要打破双亲委派机制，不同的 war 包下的类自己加载，而不向上委托，但是基础类依然向上委托。
+
+#### 如何打破？
+
+![image-20250713203023150](JVM.assets/image-20250713203023150.png)
+
+上图中，蓝色部分依旧和原来一样，使用双亲委派模型；绿色部分是 Tomcat 第一部分自定义的类加载器，这一部分加载 Tomcat 包中的类，依旧采用双亲委派模型；紫色部分是 Tomcat 第二部分自定义的类加载器，正是这一部分，打破了双亲委派模型
+
+**Tomcat 第一部分自定义类加载器 (绿色部分)**
+
+在 Tomcat6 之前，这三个类加载器在三个不同的文件夹下；而 Tomcat6 及以后这三部分合并到了一个文件夹下
+
+![image-20221028193631736](JVM.assets/1936311666956991yinpQhimage-20221028193631736.png)
+
+下面介绍这三部分的作用：
+
+- CommonClassLoader：Tomcat 最基本的类加载器，加载路径中的 class 可以被 Tomcat 容器本身和各个 webapp 访问
+- CatalinaClassLoader：Tomcat 容器中私有的类加载器，加载路径中的 class 对于 webapp 不可见的部分
+- SharedClassLoader：各个 webapps 共享的类加载器，加载路径中的 class 对于所有的 webapp 都可见，但是对于 Tomcat 容器不可见
+
+这一部分类加载器，依然采用的是双亲委派机制。**原因：**它只有一份，如果有重复，那么也是以这一份为准，这部分主要加载的是 Tomcat 自带的类
+
+**Tomcat 第二部分自定义类加载器 (紫色部分)**
+
+紫色部分是项目在打成 war 包时，Tomcat 自动生成的类加载器，专门来加载这个 war 包，而这个类加载器打破了双亲委派模型
+
+假设如果没有打破，一旦两个项目中有两个相通类名，但内容不同的类时，只会加载其中一个。
+
+
+
+#### 自定义 Tomcat 的 war 包类加载器
+
+前文 **[自定义类加载器](https://lfool.github.io/LFool-Notes/java/自定义类加载器.html)** 中介绍过如何自定义类加载器，该部分在前文的基础上，修改一丢丢即可
+
+在两个不同的包中，有两个相同的类，关系如下：
+
+```java
+➜  myself pwd           
+/Users/lfool/myself/temp/Java/test01/com/lfool/myself
+➜  myself ls
+Test.java
+# ------
+➜  myself pwd           
+/Users/lfool/myself/temp/Java/test02/com/lfool/myself
+➜  myself ls
+Test.java
+```
+
+两个类的内容如下：
+
+```java
+package com.lfool.myself;
+public class Test {
+    public void f() {
+        System.out.println("Test01 中的 Test");
+    }
+}
+// ------
+package com.lfool.myself;
+public class Test {
+    public void f() {
+        System.out.println("Test02 中的 Test");
+    }
+}
+```
+
+对应两个不同的类加载器：
+
+```java
+public static void main(String[] args) throws ClassNotFoundException, InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+    MyClassLoader myClassLoader1 = new MyClassLoader("/Users/lfool/myself/temp/Java/test01");
+    Class<?> c1 = myClassLoader1.loadClass("com.lfool.myself.Test");
+    Object obj1 = c1.newInstance();
+    Method f1 = c1.getDeclaredMethod("f", null);
+    f1.invoke(obj1, null);
+    System.out.println(c1.getClassLoader().getClass().getName());
+
+
+    MyClassLoader myClassLoader2 = new MyClassLoader("/Users/lfool/myself/temp/Java/test02");
+    Class<?> c2 = myClassLoader2.loadClass("com.lfool.myself.Test");
+    Object obj2 = c2.newInstance();
+    Method f2 = c2.getDeclaredMethod("f", null);
+    f2.invoke(obj2, null);
+    System.out.println(c2.getClassLoader().getClass().getName());
+}
+// result
+Test01 中的 Test
+com.lfool.myself.MyClassLoader
+Test02 中的 Test
+com.lfool.myself.MyClassLoader
+```
+
+
+
