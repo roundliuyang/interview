@@ -4,11 +4,26 @@
 
 ## 时间区间是否有交集
 
+### 德摩根定律（De Morgan's Laws）
+
+对于任意两个布尔表达式 `A` 和 `B`：
+
+| 原始表达式      | 等价转换              |
+| --------------- | --------------------- |
+| `NOT (A OR B)`  | `(NOT A) AND (NOT B)` |
+| `NOT (A AND B)` | `(NOT A) OR (NOT B)`  |
+
+
+
 **1.给定时间区间（begin，end），数据库字段startTime与endTime，现在要判断它们之间是否有交集。**
 
 ```shell
 SELECT * FROM xxx
 WHERE NOT ((endTime < begin) OR (startTime > end))
+
+或者
+SELECT * FROM xxx
+WHERE endTime >= begin AND startTime <= end
 ```
 
 
