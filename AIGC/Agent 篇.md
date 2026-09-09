@@ -77,6 +77,7 @@ Prompt 中有一条显式规则："Am I stuck? If repeating the same dispatch, c
 
 回答：
 我们用的是 LLM 驱动的动态多轮分解，而非硬编码的任务拆分。具体分三层：
+
 **第一层：分解规则注入**
 在 PlanningAgent 的 system prompt 中，我们定义了两条核心规则：
 
@@ -412,6 +413,900 @@ LLM学会调用外部API或工具，是其从一个纯粹的“语言模型”�
    * 控制代码将工具的返回结果<strong>再次格式化</strong>，并将其作为新的上下文信息，连同之前的对话历史一起，再次发送给LLM。
    * 这一次，LLM已经获得了它需要的信息。它会基于这个结果，生成一个最终的、流畅的自然语言回答给用户，例如：“今天新加坡的天气是晴天，温度为32摄氏度。”
 
+
+
+#### 真实示例
+
+工具调用代码：
+
+```python
+import json
+from langchain.tools import tool
+from langchain.chat_models import init_chat_model
+
+model = init_chat_model("openai:gpt-4.1")
+
+@tool
+def get_weather(location: str) -> str:
+    """获取某个位置的天气。"""
+    return f"{location} 天气晴朗。"
+
+# ===== 查看 @tool 自动生成的 Schema =====
+print("=== @tool 生成的 args_schema (JSON Schema) ===")
+print(json.dumps(get_weather.args_schema.model_json_schema(), indent=2, ensure_ascii=False))
+
+# ===== 查看 bind_tools 转换后发给 LLM 的格式 =====
+print("\n=== bind_tools 转换后的 OpenAI tools 格式 ===")
+# 将 tool 转换为 OpenAI 格式的 tool dict
+from langchain_core.utils.function_calling import convert_to_openai_tool
+print(json.dumps(convert_to_openai_tool(get_weather), indent=2, ensure_ascii=False))
+
+model_with_tools = model.bind_tools([get_weather])  # [!code highlight]
+
+response = model_with_tools.invoke("波士顿的天气怎么样？")
+for tool_call in response.tool_calls:
+    # 查看模型发出的工具调用
+    print(f"工具：{tool_call['name']}")
+    print(f"参数：{tool_call['args']}")
+```
+
+在当前代码中，你看不到 JSON Schema——但它确实在背后生成了。整个流程分为两层：
+第一层：@tool 装饰器 → 自动生成 Schema
+
+```python
+@tool
+def get_weather(location: str) -> str:
+    """获取某个位置的天气。"""
+    return f"{location} 天气晴朗。"
+```
+
+**@tool 装饰器做了以下事情：**
+
+| 从代码中提取                         | 生成的 Schema 字段                            |
+| ------------------------------------ | --------------------------------------------- |
+| 函数名 get_weather                   | function.name                                 |
+| docstring """获取某个位置的天气。""" | function.description                          |
+| 参数 location: str                   | parameters.properties.location (type: string) |
+| 返回类型 -> str                      | 不发送给 LLM，仅内部使用）                    |
+
+**第二层：bind_tools → 转换为 LLM 提供商格式**
+
+```python
+model_with_tools = model.bind_tools([get_weather])
+```
+
+bind_tools 会将上面的 Schema 转换为 OpenAI API 要求的格式，最终发送给 OpenAI 的请求体中会包含类似这样的 JSON：
+```json
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "获取某个位置的天气。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string"
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    }
+  ]
+}
+```
+
+现在运行这个文件，你会看到两段 JSON 输出：
+**输出 1：@tool 生成的原始 JSON Schema**
+
+```json
+=== @tool 生成的 args_schema (JSON Schema) ===
+{
+  "description": "获取某个位置的天气。",
+  "properties": {
+    "location": {
+      "title": "Location",
+      "type": "string"
+    }
+  },
+  "required": [
+    "location"
+  ],
+  "title": "get_weather",
+  "type": "object"
+}
+```
+
+这是 Pydantic 根据你的函数签名自动生成的标准 JSON Schema。
+
+**输出 2：bind_tools 转换后的 OpenAI 格式**
+
+```json
+=== bind_tools 转换后的 OpenAI tools 格式 ===
+{
+  "type": "function",
+  "function": {
+    "name": "get_weather",
+    "description": "获取某个位置的天气。",
+    "parameters": {
+      "properties": {
+        "location": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "location"
+      ],
+      "type": "object"
+    }
+  }
+}
+```
+
+**整个流程总结**
+
+```
+Python 函数                    @tool 装饰器                   bind_tools
+─────────────                  ──────────                    ──────────
+def get_weather(location: str)  →  Pydantic Model  →  OpenAI tools JSON  →  发送给 LLM
+    """获取某个位置的天气。"""       (JSON Schema)      (function calling 格式)
+```
+
+核心要点：
+
+- 函数名 → name
+- docstring → description（LLM 靠它判断何时调用）
+- 参数类型注解 → parameters（LLM 靠它知道要传什么参数）
+- 这一切都是自动完成的，LangChain 帮你隐藏了 Schema 生成的复杂性
+
+**当LLM决定调用工具时，它的输出一个特殊格式的、结构化的JSON对象**
+![image-20260907233958742](Agent 篇.assets/image-20260907233958742.png)
+
+
+
+### MCP协议
+
+#### **一、先看问题：没有 MCP 之前世界是什么样的**
+
+假设你是一个开发者，想让 AI 助手帮你做三件事：查天气、读数据库、发 Slack 消息。
+没有 MCP 的时代：
+
+```
+                        ┌─ 天气 API ──── 你要写一套对接代码（REST 调用）
+Claude Desktop ─────────┤─ 数据库 ────── 你要写一套对接代码（SQL 连接）
+                        └─ Slack ─────── 你要写一套对接代码（Webhook）
+
+                        ┌─ 天气 API ──── 又要重新写一套（格式不同！）
+Cline (VS Code) ────────┤─ 数据库 ────── 又要重新写一套
+                        └─ Slack ─────── 又要重新写一套
+
+                        ┌─ 天气 API ──── 还得再写一套
+你的自研 Agent ───────────┤─ 数据库 ────── 还得再写一套
+                        └─ Slack ─────── 还得再写一套
+
+总共 3 × 3 = 9 种对接方式，每种都是"烟囱式"的定制开发
+```
+
+每个 AI 客户端有自己的插件格式，每个工具有自己的 API 风格。这就是 N × M 集成困境。
+
+有了 MCP 之后：
+
+```
+Claude Desktop ──┐
+                 │
+Cline ───────────┼── MCP ──→ MCP Servers ──→ Weather
+                 │                    ├──────→ Database
+Your Agent ──────┘                    └──────→ Slack
+
+
+每个工具只开发 1 个 MCP Server
+每个客户端只实现 1 个 MCP Client
+
+总共 3 + 3 = 6，而且各自独立开发，互不影响
+```
+
+#### 二、MCP 协议到底定义了什么
+
+MCP 协议本质上是一份合同规范，规定了客户端和服务端之间"怎么对话"。这份合同包含三个层面：
+
+##### 层面 1：消息格式 — "用什么语言说话"
+
+MCP 选择了 JSON-RPC 2.0 作为消息格式。每条消息都长这样：
+
+```json
+// 请求（客户端 → 服务端）
+{
+  "jsonrpc": "2.0",        // 固定版本号
+  "method": "tools/list",  // 要做什么
+  "id": 2                  // 请求编号，用于匹配响应
+}
+
+// 响应（服务端 → 客户端）
+{
+  "jsonrpc": "2.0",
+  "result": { ... },       // 执行结果
+  "id": 2                  // 对应请求的编号
+}
+```
+
+这跟你在 client_handshake_demo.py 里打印出来的完全一致。
+
+JSON-RPC 有三种消息类型：
+
+| 类型         | 类型               | 例子                                    |
+| ------------ | ------------------ | --------------------------------------- |
+| Request      | 请求，期望对方回复 | tools/list（给我工具列表）              |
+| Response     | 对 Request 的回复  | 返回工具列表的 JSON                     |
+| Notification | 通知，不需要回复   | notifications/initialized（我准备好了） |
+
+你在 demo 里也看到了 —— notifications/initialized 发送后没有等待响应，因为它是通知类型。
+
+##### **层面 2：传输方式 — "用什么管道传输"**
+
+MCP 定义了两种传输方式：
+```
+方式 A：SSE（Server-Sent Events）—— 远程通信
+────────────────────────────────────────────
+  客户端                              服务端
+    │                                    │
+    │── GET /sse ───────────────────────>│  建立 SSE 长连接（一直开着）
+    │<── event: endpoint ───────────────│  服务端告诉客户端：发请求用这个URL
+    │                                    │
+    │── POST /messages/?session_id=xxx ─>│  客户端发 JSON-RPC 请求
+    │   (HTTP 202, 空 body)              │  （POST 只是"投递"，不带结果）
+    │                                    │
+    │<── event: message ────────────────│  服务端通过 SSE 推送 JSON-RPC 响应
+    │   (data: {"jsonrpc":"2.0",...})    │
+    │                                    │
+
+
+方式 B：stdio（标准输入/输出）—— 本地通信
+────────────────────────────────────────────
+  客户端（父进程）              服务端（子进程）
+    │                              │
+    │── stdin 写入 JSON-RPC ──────>│  客户端把请求写到子进程的标准输入
+    │                              │
+    │<── stdout 读出 JSON-RPC ────│  服务端把响应写到标准输出
+    │                              │
+```
+
+SE 适合远程服务（比如你的 server.py 跑在某个服务器上），stdio 适合本地工具（比如 Claude Desktop 在本地启动一个 MCP Server 进程）。
+
+##### 层面 3：协议方法 — "具体说哪些话"
+
+MCP 协议定义了一组标准方法（就像 HTTP 定义了 GET、POST、PUT 一样）：
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MCP 协议定义的标准方法                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  生命周期管理：                                                  │
+│  ├── initialize          客户端说："我要连你，这是我的能力"        │
+│  ├── initialized         客户端说："好的，握手完成"               │
+│  └── ping                任意一方说："你还活着吗？"               │
+│                                                                 │
+│  Tools（工具）：                                                 │
+│  ├── tools/list          客户端说："你有哪些工具？"               │
+│  └── tools/call          客户端说："调用 get_weather 这个工具"    │
+│                                                                 │
+│  Resources（资源）：                                             │
+│  ├── resources/list      客户端说："你有哪些资源？"               │
+│  ├── resources/read      客户端说："读一下 weather://tokyo"       │
+│  └── resources/templates/list  客户端说："有哪些资源模板？"        │
+│                                                                 │
+│  Prompts（提示词模板）：                                          │
+│  ├── prompts/list        客户端说："你有哪些提示词模板？"          │
+│  └── prompts/get         客户端说："给我 weather_report 模板"     │
+│                                                                 │
+│  Sampling（采样 — 服务端反过来请求客户端）：                       │
+│  └── sampling/createMessage  服务端说："帮我问问 LLM 这个事"      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 三、用你的代码把协议"落地"
+
+你的 server.py 只有 27 行，但它背后做的事情是：
+
+```python
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("Weather Service")   # ① 创建 MCP Server，声明服务名
+
+@mcp.tool()                         # ② 注册一个 Tool
+def get_weather(location: str) -> str:
+    """Get the current weather for a specified location."""
+    return f"Weather in {location}: Sunny, 72°F"
+
+@mcp.resource("weather://{location}")  # ③ 注册一个 Resource
+def weather_resource(location: str) -> str:
+    return f"Weather data for {location}: Sunny, 72°F"
+
+@mcp.prompt()                       # ④ 注册一个 Prompt
+def weather_report(location: str) -> str:
+    return f"""You are a weather reporter..."""
+
+mcp.run(transport="sse")            # ⑤ 启动 SSE 传输，监听端口 8000
+```
+
+FastMCP 框架在背后自动帮你做了这些事：
+
+| 你写的代码      | 框架自动生成的 MCP 响应                                      |
+| --------------- | ------------------------------------------------------------ |
+| @mcp.tool()     | tools/list 返回 {"name": "get_weather", "inputSchema": {...}} |
+| @mcp.resource() | resources/list 返回 {"uri": "weather://{location}", ...}     |
+| @mcp.prompt()   | prompts/list 返回 {"name": "weather_report", ...}            |
+| mcp.run()       | 启动 HTTP 服务器，挂载 /sse 和 /messages/ 路由               |
+
+你在 demo 脚本中看到的 tools/list 响应，就是这个 Server 自动生成的：
+```json
+{
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather for a specified location.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "location": { "type": "string" }
+        },
+        "required": ["location"]
+      }
+    }
+  ]
+}
+```
+
+AI 客户端（如 Cline）拿到这个 JSON 后就知道："哦，有个 get_weather 工具，需要传一个 location 字符串参数"。然后当用户问"新加坡天气怎么样"时，AI 就会生成一个 tools/call 请求：
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "get_weather",
+    "arguments": { "location": "Singapore" }
+  }
+}
+```
+
+#### 四、完整时序图：从连接到使用
+
+把以上所有内容串起来，一次完整的 MCP 交互长这样：
+```
+Cline (MCP Client)                            你的 server.py (MCP Server)
+      │                                              │
+      │  ── 第一阶段：建立连接 ──                      │
+      │                                              │
+      │══ GET /sse ═════════════════════════════════>│  建立 SSE 长连接
+      │<══ event: endpoint ══════════════════════════│  "/messages/?session_id=abc"
+      │                                              │
+      │  ── 第二阶段：握手 ──                          │
+      │                                              │
+      │── POST initialize ──────────────────────────>│  "我是 Cline，支持这些能力"
+      │<══ SSE: initialize response ════════════════│  "我是 Weather Service，支持 tools/resources/prompts"
+      │── POST initialized ─────────────────────────>│  "好的，握手完成"（通知，无响应）
+      │                                              │
+      │  ── 第三阶段：发现 ──                          │
+      │                                              │
+      │── POST tools/list ──────────────────────────>│  "你有哪些工具？"
+      │<══ SSE: [{"name":"get_weather",...}] ═══════│  "有 get_weather，参数是 location"
+      │── POST resources/list ──────────────────────>│  "你有哪些资源？"
+      │<══ SSE: [{"uri":"weather://..."}] ══════════│  "有 weather://{location} 资源"
+      │── POST prompts/list ────────────────────────>│  "你有哪些提示词？"
+      │<══ SSE: [{"name":"weather_report"}] ════════│  "有 weather_report 提示词"
+      │                                              │
+      │  ── 第四阶段：使用 ──                          │
+      │                                              │
+      │── POST tools/call ──────────────────────────>│  "调用 get_weather，location=Singapore"
+      │                                              │  → 执行你的 Python 函数
+      │<══ SSE: "Sunny, 72°F" ══════════════════════│  ← 返回函数执行结果
+      │                                              │
+      │  ── 更多调用... ──                            │
+      │                                              │
+      │── POST tools/call ──────────────────────────>│  "调用 get_weather，location=Tokyo"
+      │<══ SSE: "Sunny, 72°F" ══════════════════════│
+```
+
+#### 五、一句话总结
+
+MCP = JSON-RPC 2.0（消息格式） + SSE/stdio（传输方式） + 标准方法集（工具/资源/提示词）
+它不是某个框架或 SDK，而是一份协议规范 —— 只要你的程序能收发 JSON-RPC 消息、实现那几个标准方法，你就是一个合规的 MCP Server 或 MCP Client。就像任何能处理 HTTP 请求/响应的程序都是 Web 服务器一样。
+
+#### 真实示例
+
+```sh
+D:\Anaconda\envs\python_all\python.exe D:\allevery\python_all\mcp\sdk_example\client_handshake_demo.py 
+🔌 MCP 协议握手全过程演示
+   目标服务: http://localhost:8000
+
+
+############################################################
+  步骤 0：连接 SSE 端点，获取消息发送地址
+############################################################
+  ✅ 收到消息端点: http://localhost:8000/messages/?session_id=30689645d59e487a919d5e46dcd74e1e
+  ✅ SSE 监听线程已启动（复用同一连接/session）
+
+############################################################
+  步骤 1：initialize — 客户端告知自身能力，请求初始化
+############################################################
+
+============================================================
+  →  客户端发送: initialize
+============================================================
+{
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "HandshakeDemoClient",
+      "version": "1.0.0"
+    }
+  },
+  "id": 1
+}
+  (HTTP POST 返回: 202，空 body = 服务端已接收)
+
+============================================================
+  ←  服务端响应 (通过SSE推送): initialize
+============================================================
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "experimental": {},
+      "prompts": {
+        "listChanged": false
+      },
+      "resources": {
+        "subscribe": false,
+        "listChanged": false
+      },
+      "tools": {
+        "listChanged": false
+      }
+    },
+    "serverInfo": {
+      "name": "Weather Service",
+      "version": "1.25.0"
+    }
+  }
+}
+
+############################################################
+  步骤 2：initialized — 客户端确认初始化完成
+############################################################
+
+============================================================
+  →  客户端发送: notifications/initialized
+============================================================
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized"
+}
+  (HTTP POST 返回: 202，空 body = 服务端已接收)
+  ← (通知，服务端不会返回响应)
+
+############################################################
+  步骤 3：tools/list — 🔑 客户端主动拉取服务端所有工具
+############################################################
+
+============================================================
+  →  客户端发送: tools/list
+============================================================
+{
+  "jsonrpc": "2.0",
+  "method": "tools/list",
+  "id": 2
+}
+  (HTTP POST 返回: 202，空 body = 服务端已接收)
+
+============================================================
+  ←  服务端响应 (通过SSE推送): tools/list
+============================================================
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get the current weather for a specified location.",
+        "inputSchema": {
+          "properties": {
+            "location": {
+              "title": "Location",
+              "type": "string"
+            }
+          },
+          "required": [
+            "location"
+          ],
+          "title": "get_weatherArguments",
+          "type": "object"
+        },
+        "outputSchema": {
+          "properties": {
+            "result": {
+              "title": "Result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result"
+          ],
+          "title": "get_weatherOutput",
+          "type": "object"
+        }
+      }
+    ]
+  }
+}
+
+############################################################
+  步骤 4：resources/list — 客户端主动拉取服务端所有资源
+############################################################
+
+============================================================
+  →  客户端发送: resources/list
+============================================================
+{
+  "jsonrpc": "2.0",
+  "method": "resources/list",
+  "id": 3
+}
+  (HTTP POST 返回: 202，空 body = 服务端已接收)
+
+============================================================
+  ←  服务端响应 (通过SSE推送): resources/list
+============================================================
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "resources": []
+  }
+}
+
+############################################################
+  步骤 5：prompts/list — 客户端主动拉取服务端所有提示词
+############################################################
+
+============================================================
+  →  客户端发送: prompts/list
+============================================================
+{
+  "jsonrpc": "2.0",
+  "method": "prompts/list",
+  "id": 4
+}
+  (HTTP POST 返回: 202，空 body = 服务端已接收)
+
+============================================================
+  ←  服务端响应 (通过SSE推送): prompts/list
+============================================================
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "prompts": [
+      {
+        "name": "weather_report",
+        "description": "Create a weather report prompt.",
+        "arguments": [
+          {
+            "name": "location",
+            "required": true
+          }
+        ]
+      }
+    ]
+  }
+}
+
+############################################################
+  步骤 6：tools/call — 客户端实际调用 get_weather 工具
+############################################################
+
+============================================================
+  →  客户端发送: tools/call
+============================================================
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "get_weather",
+    "arguments": {
+      "location": "Singapore"
+    }
+  },
+  "id": 5
+}
+  (HTTP POST 返回: 202，空 body = 服务端已接收)
+
+============================================================
+  ←  服务端响应 (通过SSE推送): tools/call
+============================================================
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Weather in Singapore: Sunny, 72°F"
+      }
+    ],
+    "structuredContent": {
+      "result": "Weather in Singapore: Sunny, 72°F"
+    },
+    "isError": false
+  }
+}
+
+
+============================================================
+  ✅ 握手全过程完成！
+============================================================
+
+  核心要点：
+  ┌──────────────┐                              ┌───────────┐
+  │    Client     │                              │ MCP Server│
+  │   (Cline)    │                              │(server.py)│
+  └──────┬───────┘                              └─────┬─────┘
+         │                                            │
+         │═══ GET /sse (建立SSE长连接) ═══════════════>│
+         │<══ SSE event "endpoint" ═══════════════════│  服务端告知POST地址
+         │    (含 session_id，后续必须用同一个)          │
+         │                                            │
+         │─── POST /messages/?session_id=xxx ─────────>│  客户端发请求
+         │    (HTTP 202 空 body，仅表示"已接收")         │
+         │                                            │
+         │<══ SSE event "message" (JSON-RPC) ════════│  服务端通过同一SSE连接推送响应
+         │                                            │
+    
+
+Process finished with exit code 0
+
+```
+
+
+
+### Skill 深度原理解析：从 Function Calling 到 Skill Context Protocol
+
+#### 一、Tool vs Skill：两种扩展 Agent 能力的范式
+
+在理解 Skill 之前，需要先理解它与 Tool 的本质区别。本项目同时实现了两套协议，形成了一种双轨制的能力扩展体系：
+
+| 维度        | Tool (TCP)                           | Skill (SCP)                                     |
+| ----------- | ------------------------------------ | ----------------------------------------------- |
+| 定义方式    | Python 类（继承 Tool）               | Markdown 包（SKILL.md + scripts/ + resources/） |
+| Schema 生成 | 自动从类签名生成 JSON Schema         | 从 YAML frontmatter 解析元数据                  |
+| 注册方式    | @TOOL.register_module 装饰器         | SCP Server 扫描目录或运行时注册                 |
+| 告知 LLM    | Function Calling 格式（结构化 JSON） | Prompt Injection（XML 标签包裹的文本摘要）      |
+| 执行机制    | 定性代码执行（Python __call__）      | LLM 解释执行（SKILL.md 内容 + 用户参数 → LLM）  |
+| 本质        | 刚性工具：代码即逻辑                 | 柔性知识包：Markdown 即指令                     |
+
+核心洞察：Tool 是给机器执行的，Skill 是给 LLM 阅读的。
+
+#### 二、Skill 的完整生命周期
+
+##### 2.1 Skill 的定义：以 Markdown 为中心的知识包
+
+一个 Skill 是一个自包含的目录，其结构如下（以 hello_world 为例）：
+```
+hello_world/
+├── SKILL.md                    # 核心：YAML frontmatter + 完整的Markdown指令
+├── scripts/
+│   └── hello.py                # 可选：可执行的Python脚本
+├── resources/
+│   └── greetings.json          # 可选：数据/配置文件
+├── examples.md                 # 可选：用法示例文档
+└── reference.md                # 可选：API参考文档
+```
+
+SKILL.md 是 Skill 的灵魂，其结构为：
+
+```markdown
+---
+name: hello-world
+description: A demonstration skill that greets users...
+---
+
+# Hello World Skill
+## Quick Start
+## Instructions
+## Workflow
+## Examples
+...
+```
+
+- YAML frontmatter（--- 之间的部分）：提供机器可读的元数据（名称、描述、版本）
+- Markdown body：提供 LLM 可读的完整指令（工作流、步骤、条件逻辑、模板等）
+
+##### 2.2 Skill 的发现与加载
+
+SkillContextManager.initialize() 的完整流程：
+```
+阶段1: 扫描 default_skills/ 目录 → 发现包含 SKILL.md 的子目录
+阶段2: 从 workdir/skill/skill.json 加载已持久化的历史技能
+阶段3: 合并两个来源（版本号更高者优先）
+阶段4: 按 skill_names 过滤（可选）
+阶段5: 为每个技能构建文本摘要 → 注册版本 → 存入内存
+阶段6: 持久化到 skill.json + contract.md
+```
+
+关键代码在 _parse_skill_dir()，它从目录中解析出 SkillConfig：
+```python
+# 解析 YAML frontmatter → 提取 name, description, version
+frontmatter, body = self._parse_frontmatter(raw)
+
+# 扫描子目录 → 收集 scripts, resources, reference_files
+scripts = [str(p) for p in sorted(scripts_dir.rglob("*")) if p.is_file()]
+resources = [str(p) for p in sorted(resources_dir.rglob("*")) if p.is_file()]
+```
+
+##### 2.3 Skill 的"Schema"生成：文本摘要而非 JSON Schema
+
+这是 Skill 与 Tool 最根本的区别。Tool 通过 dynamic_manager.build_function_calling() 生成标准的 JSON Schema 发给 LLM，而 Skill 通过 _build_text_representation() 生成一段纯文本摘要：
+```python
+@staticmethod
+def _build_text_representation(skill_config: SkillConfig) -> str:
+    parts = [
+        f"Skill: {skill_config.name}",
+        f"Description: {skill_config.description}",
+        f"Version: {skill_config.version}",
+        f"Skill Directory: {skill_config.skill_dir}",
+        f"SKILL.md: {os.path.join(skill_config.skill_dir, 'SKILL.md')}",
+    ]
+    if skill_config.scripts:
+        parts.append("Scripts:")
+        for s in skill_config.scripts:
+            parts.append(f"  - {s}")
+    # ... resources, references
+    return "\n".join(parts)
+```
+
+生成结果示例：
+```markdown
+Skill: hello-world
+Description: A demonstration skill that greets users...
+Version: 1.0.0
+Skill Directory: D:\xx\DeepResearchAgent\src\skill\default_skills\hello_world
+SKILL.md: D:\xx\DeepResearchAgent\src\skill\default_skills\hello_world\SKILL.md
+Scripts:
+  - D:\xx\DeepResearchAgent\src\skill\default_skills\hello_world\scripts\hello.py
+Resources:
+  - D:\xx\DeepResearchAgent\src\skill\default_skills\hello_world\resources\greetings.json
+```
+
+注意：这里不包含完整的 SKILL.md 内容，只是一个"目录卡片"。完整内容在执行时才被加载。
+
+#### 三、Skill 的运行时执行：两阶段 LLM 调用
+
+##### 3.1 第一阶段：Prompt Injection — 让 LLM 知道有哪些 Skill
+
+在 ToolCallingAgent._get_messages() 中，Skill 上下文作为动态模块注入到 prompt 模板中：
+```python
+# 4. 注入技能上下文：已加载技能的元数据摘要
+agent_message_modules.update(await self._get_skill_context(ctx=ctx))
+```
+
+_get_skill_context() 通过 SCP 获取所有技能的摘要，包裹在 XML 标签中：
+
+```
+skill_content = await scp.get_context()
+# 输出格式：
+# <skill name="hello-world">
+# Skill: hello-world
+# Description: ...
+# </skill>
+skill_context = f"<skill_context>\n{skill_content}\n</skill_context>"
+```
+
+这个 skill_context 被填充到 AGENT_MESSAGE_PROMPT_TEMPLATE 的 {{ skill_context }} 占位符中，最终成为发给 LLM 的 user message 的一部分。
+同时，系统 prompt 中包含 SKILL_CONTEXT_RULES，告诉 LLM 如何使用技能：
+
+```
+- <skill_context> only contains a brief summary (name, description, file paths)
+- When a task matches a skill's description, directly use action type="skill"
+- The system will automatically load and interpret the SKILL.md content
+- Skill scripts can be executed via tools (e.g., bash or python_interpreter)
+```
+
+##### 3.2 LLM 的决策：选择调用 Skill
+
+LLM 在输出中通过 type: "skill" 来表达使用技能的意图。这是 OUTPUT 中定义的 action 格式：
+```json
+{
+    "actions": [
+        {
+            "type": "skill",
+            "name": "hello-world",
+            "args": "{\"name\": \"Alice\"}"
+        }
+    ]
+}
+```
+
+对比 Function Calling 中的 tool_call：
+```json
+{
+    "tool_call": {
+        "name": "get_current_weather",
+        "arguments": {"location": "Singapore"}
+    }
+}
+```
+
+形式上高度一致——都是 "名称 + 参数" 的结构化调用指令。区别在于路由目标不同。
+
+##### 3.3 第二阶段：Skill 执行 — LLM 即解释器
+
+在 ToolCallingAgent._think_and_tool() 中，根据 action_type 路由到不同的处理器：
+```python
+if action_type == "skill":
+    # 路由到 SCP（Skill Context Protocol）
+    response = await scp(name=action_name, input=action_args, ctx=ctx)
+else:
+    # 路由到 TCP（Tool Context Protocol）
+    tool_response = await tcp(name=action_name, input=action_args, ctx=ctx)
+```
+
+SCP 的执行逻辑（SkillContextManager.call()）是 Skill 系统最精妙的部分——它发起第二次 LLM 调用：
+```python
+# 构建系统提示：告诉 LLM 它是一个"技能执行引擎"
+system_content = (
+    "You are a skill execution engine. You are given a skill's full instructions "
+    "(from its SKILL.md) and user-provided arguments. Your job is to:\n"
+    "1. Read and understand the skill instructions.\n"
+    "2. Follow the workflow described in the skill.\n"
+    "3. Apply the user arguments to generate the appropriate output.\n"
+    "4. Return ONLY the final result."
+)
+
+# 构建用户提示：注入完整的 SKILL.md 内容 + 用户参数
+user_content = (
+    f"## Skill Instructions (from SKILL.md)\n\n"
+    f"{skill_config.content}\n\n"
+    f"## User Arguments\n\n"
+    f"```json\n{json.dumps(input, ensure_ascii=False, indent=2)}\n```\n\n"
+    f"Execute this skill and return the result."
+)
+```
+
+第二次 LLM 调用
+```python
+llm_response = await model_manager(model=effective_model, messages=messages)
+```
+
+**核心机制**：Skill 的执行不是运行代码，而是**让另一个 LLM 阅读 SKILL.md 并按指令生成结果**。
+
+#### 核心洞察：Skill 的本质
+
+1. **Skill 是 "Prompt as Code"**：Tool 的执行逻辑写在 Python 代码里，Skill 的执行逻辑写在 Markdown 里。SKILL.md 本质上是一段**可被 LLM 解释执行的程序**。
+
+2. **两层 LLM 调用架构**：第一层 LLM（Agent）负责**决策**——判断何时使用哪个技能；第二层 LLM（Skill Executor）负责**执行**——阅读 SKILL.md 并按指令生成结果。这种分离使得 Skill 可以独立于 Agent 进行迭代优化。
+
+3. **版本化与可训练性**：`require_grad=True` 的 Skill 可以通过 TextGrad 等优化器自动改进 SKILL.md 的内容。每次修改自动创建新版本（1.0.0 → 1.0.1），支持回滚。这使得 Skill 不仅是知识包，更是**可微分的知识单元**。
+
+4. **与 Function Calling 的统一接口**：尽管内部机制完全不同，但在 Agent 的输出层面，Tool 和 Skill 使用统一的 `actions` 格式，只是 `type` 字段不同。这种设计让 LLM 不需要关心底层执行机制的差异。
+
+- Tool = 代码 + JSON Schema + 确定性执行 
+- Skill = Markdown + 文本摘要 + LLM 解释执行
+- Agent 的决策 = f(tool_context, skill_context, task) 
+- → type="tool" → TCP → Python call() → 确定结果 
+- → type="skill" → SCP → LLM(SKILL.md + args) → 生成结果
+
+>Skill 系统是对 Function Calling 思想的**高层抽象扩展**：Function Calling 让 LLM 能调用函数，Skill 让 LLM 能调用**另一个 LLM 按 Markdown 指令执行任务**——这是 "LLM as Tool" 的终极形态。
+
+
+
 ### 请比较一下两个流行的 Agent 开发框架，如 LangChain 和 LlamaIndex。它们的核心应用场景有何不同？
 
 LangChain和LlamaIndex是构建LLM应用最流行的两个开源框架，它们都极大地简化了开发流程，但它们的<strong>核心哲学和设计重点有所不同</strong>，导致了它们在应用场景上的差异。
@@ -653,4 +1548,29 @@ Agent微调的数据集不是简单的（输入，输出）对，而是一系列
 2.  <strong>人工编写或修正轨迹:</strong>
 
 3.  <strong>从真实用户交互中收集数据 </strong>
+
+
+
+## 智能体框架
+
+| 维度       | 本项目                           | AutoGen          | CrewAI         | LangGraph       |
+| ---------- | -------------------------------- | ---------------- | -------------- | --------------- |
+| 编排方式   | 中心化 Planner + Bus             | 对话式           | 角色扮演流水线 | 图状态机        |
+| Agent 通信 | 通过 Bus 间接通信                | Agent 间直接对话 | 顺序传递       | 通过 State 传递 |
+| 并发能力   | `asyncio.gather` 原生并发        | 有限             | 顺序为主       | 支持            |
+| 决策方式   | LLM 结构化输出（`PlanDecision`） | LLM 自由对话     | 固定角色链     | 条件边 + 节点   |
+
+所以这个项目是一个比较正统的多智能体编排系统——Planner 做大脑，Bus 做神经，子 Agent 做手脚，每轮形成"感知→决策→行动→反馈"的完整闭环。
+
+
+
+
+
+
+
+
+
+
+
+
 

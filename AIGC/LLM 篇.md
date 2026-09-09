@@ -785,7 +785,7 @@ $$3\times512$$
 
 ​                                                                            *Self-Attention 输出*
 
-上图中 Softmax 矩阵的第 1 行表示单词 1 与其他所有单词的 attention 系数，最终单词 1 的输出 等于所有单词 i 的值$V_i$根据 attention 系数的比例加在一起得到，如下图所示：
+**上图中 Softmax 矩阵的第 1 行表示单词 1 与其他所有单词的 attention 系数，最终单词 1 的输出 等于所有单词 i 的值 $V_i$ 根据 attention 系数的比例加在一起得到，如下图所示：**
 
 ![img](LLM 篇.assets/v2-27822b2292cd6c38357803093bea5d0e_1440w.jpg)
 
